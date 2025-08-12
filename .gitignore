@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.log
+qdrant_storage/
+pdf_data/
+_pycache__/
+data/
+my_venv/

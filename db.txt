@@ -1,0 +1,129 @@
+-- 0) UUID support
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+
+-- 1) USERS & AUTH
+
+-- Users table
+CREATE TABLE users (
+  id           UUID    PRIMARY KEY DEFAULT uuid_generate_v4(),
+  username     TEXT    UNIQUE NOT NULL,
+  email        TEXT    UNIQUE NOT NULL,
+  hashed_pw    TEXT    NOT NULL,
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login   TIMESTAMPTZ
+);
+
+-- Auto‐update updated_at
+CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_users_updated
+  BEFORE UPDATE ON users
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+
+-- Roles lookup
+CREATE TABLE roles (
+  role_id     SERIAL      PRIMARY KEY,
+  name        TEXT        UNIQUE NOT NULL,  
+  description TEXT
+);
+
+-- Assign roles to users (many-to-many)
+CREATE TABLE user_roles (
+  user_id UUID NOT NULL
+    REFERENCES users(id) ON DELETE CASCADE,
+  role_id INT NOT NULL
+    REFERENCES roles(role_id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, role_id)
+);
+
+-- Refresh tokens for JWT refresh flows
+CREATE TABLE refresh_tokens (
+  token       UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID        NOT NULL
+               REFERENCES users(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);
+
+
+-- 2) CHAT DATA
+
+-- Individual chat sessions (1 user ⇒ N chats)
+CREATE TABLE chats (
+  id         UUID    PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id    UUID    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title      TEXT    NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_chats_user ON chats(user_id);
+
+-- Messages in each chat
+CREATE TABLE messages (
+  id          BIGSERIAL   PRIMARY KEY,
+  chat_id     UUID        NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  sender      TEXT        NOT NULL CHECK (sender IN ('user','assistant')),
+  content     TEXT        NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_messages_chat ON messages(chat_id);
+
+-- Uploaded files for context
+CREATE TABLE files (
+  id           UUID    PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id      UUID    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  chat_id      UUID    REFERENCES chats(id) ON DELETE SET NULL,
+  filename     TEXT    NOT NULL,
+  mime_type    TEXT,
+  storage_path TEXT    NOT NULL,
+  uploaded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_files_user ON files(user_id);
+CREATE INDEX idx_files_chat ON files(chat_id);
+
+
+-- 3) AUDIT & LOGGING
+
+-- User activities (login, logout, errors…)
+CREATE TABLE activities (
+  id           BIGSERIAL   PRIMARY KEY,
+  user_id      UUID        REFERENCES users(id) ON DELETE SET NULL,
+  activity     TEXT        NOT NULL,       -- e.g. 'login', 'failed_login'
+  metadata     JSONB,                       -- e.g. { "ip": "...", "error": "..." }
+  occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_activities_user ON activities(user_id);
+
+-- HTTP/API request logs
+CREATE TABLE request_logs (
+  id            BIGSERIAL    PRIMARY KEY,
+  user_id       UUID         REFERENCES users(id) ON DELETE SET NULL,
+  method        TEXT         NOT NULL,     -- GET, POST, etc.
+  path          TEXT         NOT NULL,
+  status_code   INT          NOT NULL,
+  ip_address    TEXT,
+  user_agent    TEXT,
+  query_params  TEXT,
+  body          JSONB,
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_request_logs_user ON request_logs(user_id);
+CREATE INDEX idx_request_logs_path ON request_logs(path);
+
+
+-- 4) OPTIONAL: Seed default roles
+INSERT INTO roles(name, description)
+VALUES
+  ('admin',     'Full system access'),
+  ('user',      'Regular authenticated user'),
+  ('moderator', 'Can manage content and users');

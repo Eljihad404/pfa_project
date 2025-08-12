@@ -1,0 +1,26 @@
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Environment and Configuration
+python-dotenv==1.0.0
+
+# LangChain Core
+langchain==0.1.0
+langchain-core==0.1.0
+
+# LangChain Integrations
+langchain-qdrant==0.1.0
+langchain-huggingface==0.0.3
+langchain-groq==0.1.0
+
+# Vector Database
+qdrant-client==1.7.0
+
+# Data Validation
+pydantic==2.5.0
+
+# Additional dependencies that might be needed
+sentence-transformers==2.2.2
+transformers==4.36.0
+torch==2.1.0
