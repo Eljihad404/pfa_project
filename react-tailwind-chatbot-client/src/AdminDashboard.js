@@ -6,8 +6,9 @@ import {
 } from 'recharts';
 import ThemeToggle from './components/ThemeToggle';
 import {
-  Bell, User, MessageSquare, FileText, Settings, BarChart2, List, RefreshCcw, Shield, ToggleRight
+  Bell, User, MessageSquare, FileText, Settings, BarChart2, List, RefreshCcw, Shield, ToggleRight, File, 
 } from 'lucide-react';
+import Docs from "./docs";
 
 const API = process.env.REACT_APP_RESTAPI_ENDPOINT || 'http://localhost:8000';
 
@@ -166,6 +167,7 @@ export default function AdminDashboard() {
     { label: 'Dashboard', icon: <BarChart2 className="w-5 h-5" /> },
     { label: 'Users', icon: <User className="w-5 h-5" /> },
     { label: 'Chat Console', icon: <MessageSquare className="w-5 h-5" /> },
+    { label: 'Docs', icon: <File className="w-5 h-5" />,path: "/docs" },
     { label: 'Logs', icon: <FileText className="w-5 h-5" /> },
     { label: 'Settings', icon: <Settings className="w-5 h-5" /> },
   ];
@@ -422,6 +424,9 @@ export default function AdminDashboard() {
                 </div>
               </div>
             </section>
+          )}
+          {activePage === 'Docs' && (
+            <Docs /> 
           )}
 
           {activePage === 'Logs' && (

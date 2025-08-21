@@ -80,3 +80,22 @@ class RequestLog(Base):
     query_params = Column(Text)
     body = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+class Document(Base):
+    __tablename__ = "documents"
+
+    # md5 of filename+content_hash generated in docs.py
+    id = Column(String, primary_key=True)
+
+    filename = Column(Text, nullable=False)
+    ext = Column(String(16), nullable=False)
+    size_bytes = Column(BigInteger, nullable=False)
+    content_hash = Column(String(64), nullable=False)
+
+    storage_path = Column(Text, nullable=False)
+
+    source = Column(Text)                      # optional
+    tags = Column(JSON)                        # list[str] (JSON works on SQLite & Postgres)
+    uploaded_by = Column(Text)                 # user id / email
+    status = Column(String(32), nullable=False, default="ready")
+
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
