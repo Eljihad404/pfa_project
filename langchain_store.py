@@ -1,15 +1,23 @@
 # langchain_store.py
 import os
+import uuid
 from typing import List, Dict
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+)
 
 # LangChain imports across versions
 try:
-    from langchain_huggingface import HuggingFaceEmbeddings  # new
-except Exception:  # older LC
-    from langchain.embeddings import HuggingFaceEmbeddings
+    from langchain_huggingface import HuggingFaceEmbeddings  # newer LC
+except Exception:
+    from langchain.embeddings import HuggingFaceEmbeddings  # older LC
 
 # --------------------
 # Config
@@ -24,8 +32,8 @@ DISTANCE = os.getenv("EMBED_DISTANCE", "COSINE").upper()  # COSINE | DOT | EUCLI
 # Clients
 # --------------------
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-
 embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+
 
 def _embedding_dim() -> int:
     """
@@ -34,31 +42,30 @@ def _embedding_dim() -> int:
     - try .model.get_sentence_embedding_dimension()
     - fallback: len(embed_query("probe"))
     """
-    # try underlying SentenceTransformer (some LC versions expose `.client`, others `.model`)
     for attr in ("client", "model"):
         try:
             st = getattr(embeddings, attr)
             return st.get_sentence_embedding_dimension()
         except Exception:
             pass
-    # last resort: compute one vector
     return len(embeddings.embed_query("dimension probe"))
 
-def _ensure_collection():
+
+def _ensure_collection() -> None:
     dim = _embedding_dim()
+    # If collection exists, leave it
     try:
-        client.get_collection(QDRANT_COLLECTION)  # exists → OK
+        client.get_collection(QDRANT_COLLECTION)
         return
     except Exception:
-        # 404 → create
         pass
 
-    from qdrant_client.models import Distance as D
-    dist_map = {"COSINE": D.COSINE, "DOT": D.DOT, "EUCLID": D.EUCLID}
+    dist_map = {"COSINE": Distance.COSINE, "DOT": Distance.DOT, "EUCLID": Distance.EUCLID}
     client.create_collection(
         collection_name=QDRANT_COLLECTION,
-        vectors_config=VectorParams(size=dim, distance=dist_map.get(DISTANCE, D.COSINE)),
+        vectors_config=VectorParams(size=dim, distance=dist_map.get(DISTANCE, Distance.COSINE)),
     )
+
 
 _ensure_collection()
 
@@ -66,19 +73,24 @@ _ensure_collection()
 # Public API
 # --------------------
 def upsert_document(doc_id: str, chunks: List[str], metadata: Dict):
+    """
+    Embed chunks and upsert to Qdrant. Uses deterministic UUIDv5 per (doc_id, chunk_index).
+    """
     if not chunks:
         return
 
     vectors = embeddings.embed_documents(chunks)
+    if len(vectors) != len(chunks):
+        raise ValueError("embed_documents returned a different length than chunks")
 
-    points = []
+    points: List[PointStruct] = []
     for i, (vec, text) in enumerate(zip(vectors, chunks)):
-        # ✅ Use a deterministic UUIDv5 so reindexing/upserting is idempotent
-        pid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{i}"))
+        # Deterministic, valid UUID object (NOT a string)
+        pid = uuid.uuid5(uuid.NAMESPACE_URL, f"{doc_id}:{i}")
 
         points.append(
             PointStruct(
-                id=pid,               # <-- must be an int or a UUID
+                id=str(pid),         # pass uuid.UUID directly
                 vector=vec,
                 payload={
                     **(metadata or {}),
@@ -90,6 +102,7 @@ def upsert_document(doc_id: str, chunks: List[str], metadata: Dict):
         )
 
     client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+
 
 def delete_document(doc_id: str):
     """

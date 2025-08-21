@@ -5,10 +5,9 @@ import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
 import ThemeToggle from './components/ThemeToggle';
-import {
-  Bell, User, MessageSquare, FileText, Settings, BarChart2, List, RefreshCcw, Shield, ToggleRight, File, 
-} from 'lucide-react';
+import { Bell, User, MessageSquare, FileText, Settings, BarChart2, List, RefreshCcw, ToggleRight, File } from 'lucide-react';
 import Docs from "./docs";
+import ChatConsole from "./components/ChatConsole";
 
 const API = process.env.REACT_APP_RESTAPI_ENDPOINT || 'http://localhost:8000';
 
@@ -26,9 +25,16 @@ export default function AdminDashboard() {
   const [tokenUsageData, setTokenUsageData] = useState([]);
 
   // Users
-  const [users, setUsers] = useState([]);
+  const [allUsers, setAllUsers] = useState([]); // raw from API
+  const [users, setUsers] = useState([]);       // filtered for the table
   const [usersLoading, setUsersLoading] = useState(false);
+
+  // Search + Filters
   const [userQuery, setUserQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');   // debounce typing
+  const [roleFilter, setRoleFilter] = useState('all');        // 'all' or role name
+  const [activeFilter, setActiveFilter] = useState('all');    // 'all' | 'active' | 'inactive'
+const [typingKey, setTypingKey] = useState(0);
 
   // Chat console
   const [selectedUser, setSelectedUser] = useState('');
@@ -78,19 +84,50 @@ export default function AdminDashboard() {
   }
 
   // Users
-  async function loadUsers() {
-    try {
-      setUsersLoading(true);
-      const qs = userQuery ? `?q=${encodeURIComponent(userQuery)}` : '';
-      const res = await fetch(`${API}/admin/users${qs}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) throw new Error('Failed to load users');
-      setUsers(await res.json());
-    } catch (e) {
-      setError(e.message || 'Failed to load users');
-    } finally {
-      setUsersLoading(false);
-    }
+async function loadUsers() {
+  try {
+    setUsersLoading(true);
+    const qs = userQuery ? `?q=${encodeURIComponent(userQuery.trim())}` : '';
+    const res = await fetch(`${API}/admin/users${qs}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error('Failed to load users');
+    const data = await res.json();
+    setAllUsers(Array.isArray(data) ? data : []);
+  } catch (e) {
+    setError(e.message || 'Failed to load users');
+    setAllUsers([]);
+  } finally {
+    setUsersLoading(false);
   }
+}
+// Debounce search + filters when on "Users" page
+useEffect(() => {
+  const id = setTimeout(() => {
+    setDebouncedQuery(userQuery.trim().toLowerCase());
+  }, 300);
+  return () => clearTimeout(id);
+}, [userQuery]);
+useEffect(() => {
+  const filtered = allUsers.filter(u => {
+    const q = debouncedQuery;
+    const name = (u.username || '').toLowerCase();
+    const email = (u.email || '').toLowerCase();
+
+    const matchQ = !q || name.includes(q) || email.includes(q);
+    const matchRole =
+      roleFilter === 'all' ||
+      (Array.isArray(u.roles) && u.roles.includes(roleFilter));
+    const matchActive =
+      activeFilter === 'all' ||
+      (activeFilter === 'active' ? !!u.is_active : !u.is_active);
+
+    return matchQ && matchRole && matchActive;
+  });
+
+  setUsers(filtered);
+}, [allUsers, debouncedQuery, roleFilter, activeFilter]);
+
 
   async function toggleActive(u) {
     const body = { is_active: !u.is_active };
@@ -101,6 +138,91 @@ export default function AdminDashboard() {
     });
     if (res.ok) loadUsers();
   }
+const [editingId, setEditingId] = useState(null);        // user.id being edited
+const [editDraft, setEditDraft] = useState(null);        // { username, email, roles }
+const [roleInput, setRoleInput] = useState("");          // input for adding a role
+const [savingId, setSavingId] = useState(null);          // disable buttons while saving
+
+function startEdit(u) {
+  setEditingId(u.id);
+  setEditDraft({
+    username: u.username || "",
+    email: u.email || "",
+    roles: Array.isArray(u.roles) ? [...u.roles] : [],
+  });
+  setRoleInput("");
+}
+
+function cancelEdit() {
+  setEditingId(null);
+  setEditDraft(null);
+  setRoleInput("");
+}
+
+function handleEditChange(field, value) {
+  setEditDraft(d => ({ ...d, [field]: value }));
+}
+
+function removeRoleFromDraft(role) {
+  setEditDraft(d => ({ ...d, roles: d.roles.filter(r => r !== role) }));
+}
+
+function addRoleToDraft(raw) {
+  const r = (raw || "").trim();
+  if (!r) return;
+  setEditDraft(d => {
+    if (d.roles.includes(r)) return d; // no duplicates
+    return { ...d, roles: [...d.roles, r] };
+  });
+  setRoleInput("");
+}
+
+function handleRoleKeyDown(e) {
+  if (e.key === "Enter" || e.key === "," || e.key === "Tab") {
+    e.preventDefault();
+    addRoleToDraft(roleInput);
+  }
+}
+
+function sameRoles(a = [], b = []) {
+  const A = [...a].map(x => x.trim()).filter(Boolean).sort();
+  const B = [...b].map(x => x.trim()).filter(Boolean).sort();
+  return A.length === B.length && A.every((x, i) => x === B[i]);
+}
+
+async function saveUserDraft(originalUser) {
+  if (!editingId || !editDraft) return;
+
+  // Always send username & email, plus roles if present
+  const body = {
+    username: (editDraft.username || "").trim(),
+    email: (editDraft.email || "").trim(),
+  };
+  // Only send roles if you allow changing them (we do)
+  if (Array.isArray(editDraft.roles)) body.roles = editDraft.roles;
+
+  try {
+    setSavingId(editingId);
+    const res = await fetch(`${API}/admin/users/${originalUser.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      if (res.status === 409) throw new Error(j.detail || "Username/email already in use");
+      throw new Error(j.detail || "Failed to save user changes");
+    }
+
+    cancelEdit();
+    await loadUsers();
+  } catch (e) {
+    setError(e.message || "Failed to save user changes");
+  } finally {
+    setSavingId(null);
+  }
+}
 
   // Chat console
   async function loadChatsForUser(uid) {
@@ -183,57 +305,63 @@ export default function AdminDashboard() {
     <div className="flex h-screen bg-gray-100 dark:bg-gray-900">
       {/* Sidebar */}
       <aside className={`${sidebarOpen ? 'w-64' : 'w-20'} bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-all duration-300`}>
-        <div className="p-4 flex justify-between items-center">
-          <h2 className="text-xl font-bold text-indigo-600 dark:text-indigo-400">Admin</h2>
-          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="focus:outline-none">
-            <List />
-          </button>
-        </div>
-        <nav className="mt-2">
-          {navItems.map((item) => (
-            <div
-              key={item.label}
-              onClick={() => setActivePage(item.label)}
-              className={`flex items-center px-4 py-2 cursor-pointer space-x-3 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 ${activePage === item.label ? 'bg-gray-100 dark:bg-gray-700' : ''}`}
-            >
-              {item.icon}
-              {sidebarOpen && <span>{item.label}</span>}
-            </div>
-          ))}
-        </nav>
-      </aside>
+  <div className="p-4 flex items-center justify-between">
+    {sidebarOpen && (
+      <h2 className="text-xl font-bold text-indigo-600 dark:text-indigo-400">
+        Admin
+      </h2>
+    )}
+    <button 
+      onClick={() => setSidebarOpen(!sidebarOpen)} 
+      className="focus:outline-none ml-auto"
+    >
+      <List />
+    </button>
+  </div>
+  <nav className="mt-2">
+    {navItems.map((item) => (
+      <div
+        key={item.label}
+        onClick={() => setActivePage(item.label)}
+        className={`flex items-center px-4 py-2 cursor-pointer space-x-3 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 ${activePage === item.label ? 'bg-gray-100 dark:bg-gray-700' : ''}`}
+      >
+        {item.icon}
+        {sidebarOpen && <span>{item.label}</span>}
+      </div>
+    ))}
+  </nav>
+</aside>
+
 
       {/* Main */}
       <div className="flex-1 flex flex-col">
         {/* Topbar */}
         <header className="flex items-center justify-between px-6 py-4 bg-white dark:bg-gray-800 shadow">
-          <div className="flex items-center space-x-4">
-            <input
-              type="text"
-              placeholder="Search..."
-              className="px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 dark:bg-gray-900 dark:border-gray-700"
-              value={userQuery}
-              onChange={(e) => setUserQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && activePage === 'Users' && loadUsers()}
-            />
-            <button className="relative">
-              <Bell className="w-6 h-6 text-gray-600 dark:text-gray-300" />
-              <span className="absolute top-0 right-0 inline-block w-2 h-2 bg-red-600 rounded-full" />
-            </button>
-          </div>
-          <div className="flex items-center space-x-3">
-            <ThemeToggle />
-            <button
-              onClick={() => activePage === 'Dashboard' ? loadDashboard(true) : activePage === 'Users' ? loadUsers() : activePage === 'Logs' ? loadLogs() : null}
-              className="flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
-              title="Refresh"
-            >
-              <RefreshCcw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Refresh</span>
-            </button>
-            <div className="bg-indigo-500 text-white px-3 py-1 rounded-full">Admin</div>
-          </div>
-        </header>
+  {/* Left side */}
+  <div className="flex items-center space-x-3">
+    <ThemeToggle />
+  </div>
+
+  {/* Right side */}
+  <div className="flex items-center space-x-3">
+    <button
+      onClick={() =>
+        activePage === 'Dashboard' ? loadDashboard(true)
+        : activePage === 'Users' ? loadUsers()
+        : activePage === 'Logs' ? loadLogs()
+        : null
+      }
+      className="flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+      title="Refresh"
+    >
+      <RefreshCcw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+      <span className="hidden sm:inline">Refresh</span>
+    </button>
+
+    <div className="bg-indigo-500 text-white px-3 py-1 rounded-full">Admin</div>
+  </div>
+</header>
+
 
         {/* Content */}
         <main className="p-6 overflow-y-auto">
@@ -293,138 +421,238 @@ export default function AdminDashboard() {
           )}
 
           {activePage === 'Users' && (
-            <section className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-lg font-medium text-gray-800 dark:text-gray-200">Users</h2>
-                <button
-                  onClick={loadUsers}
-                  className="px-3 py-2 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
-                >
-                  Refresh
-                </button>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="text-left text-gray-600 dark:text-gray-300">
-                    <tr>
-                      <th className="py-2 pr-4">Username</th>
-                      <th className="py-2 pr-4">Email</th>
-                      <th className="py-2 pr-4">Roles</th>
-                      <th className="py-2 pr-4">Active</th>
-                      <th className="py-2 pr-4">Last Login</th>
-                      <th className="py-2 pr-4">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="text-gray-800 dark:text-gray-100">
-                    {usersLoading ? (
-                      <tr><td className="py-4" colSpan={6}>Loading…</td></tr>
-                    ) : users.length === 0 ? (
-                      <tr><td className="py-4" colSpan={6}>No users found</td></tr>
-                    ) : users.map(u => (
-                      <tr key={u.id} className="border-t border-gray-200 dark:border-gray-700">
-                        <td className="py-2 pr-4">{u.username}</td>
-                        <td className="py-2 pr-4">{u.email}</td>
-                        <td className="py-2 pr-4">
-                          {u.roles && u.roles.length ? u.roles.map(r => (
-                            <span key={r} className="inline-block px-2 py-1 mr-1 rounded bg-indigo-100 dark:bg-indigo-700/40 text-indigo-700 dark:text-indigo-200">{r}</span>
-                          )) : <span className="text-gray-500">—</span>}
-                        </td>
-                        <td className="py-2 pr-4">
-                          {u.is_active ? (
-                            <span className="inline-flex items-center gap-1 text-green-600"><ToggleRight /> Active</span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-gray-500"><ToggleRight /> Inactive</span>
+  <section className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between mb-3">
+  <div>
+    <h2 className="text-lg font-medium text-gray-800 dark:text-gray-200">Users</h2>
+    <p className="text-xs text-gray-500 dark:text-gray-400">Search by username or email, filter by role and status.</p>
+  </div>
+
+  <div className="flex flex-col sm:flex-row gap-2">
+    {/* Search */}
+    <div className="flex items-center gap-2">
+      <input
+        type="text"
+        value={userQuery}
+        onChange={(e) => setUserQuery(e.target.value)}
+        placeholder="Search by username or email..."
+        className="w-64 px-3 py-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      />
+    </div>
+
+    {/* Role filter */}
+    <select
+      value={roleFilter}
+      onChange={(e) => setRoleFilter(e.target.value)}
+      className="px-3 py-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      title="Filter by role"
+    >
+      <option value="all">All roles</option>
+      {/* If you know your roles, list them explicitly. Otherwise, derive from users: */}
+      {/* Example static roles: */}
+      <option value="admin">admin</option>
+      <option value="manager">manager</option>
+      <option value="user">user</option>
+      {/* Or compute dynamically below the table and lift them to state if you prefer */}
+    </select>
+
+    {/* Active filter */}
+    <select
+      value={activeFilter}
+      onChange={(e) => setActiveFilter(e.target.value)}
+      className="px-3 py-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      title="Filter by status"
+    >
+      <option value="all">All users</option>
+      <option value="active">Active</option>
+      <option value="inactive">Inactive</option>
+    </select>
+
+    {/* Manual refresh if needed */}
+    <button
+      onClick={loadUsers}
+      className="px-3 py-2 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+    >
+      Refresh
+    </button>
+  </div>
+</div>
+
+
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm">
+        <thead className="text-left text-gray-600 dark:text-gray-300">
+          <tr>
+            <th className="py-2 pr-4">Username</th>
+            <th className="py-2 pr-4">Email</th>
+            <th className="py-2 pr-4">Roles</th>
+            <th className="py-2 pr-4">Active</th>
+            <th className="py-2 pr-4">Last Login</th>
+            <th className="py-2 pr-4">Actions</th>
+          </tr>
+        </thead>
+
+        <tbody className="text-gray-800 dark:text-gray-100">
+          {usersLoading ? (
+            <tr><td className="py-4" colSpan={6}>Loading…</td></tr>
+          ) : users.length === 0 ? (
+            <tr><td className="py-4" colSpan={6}>No users found</td></tr>
+          ) : users.map(u => {
+              const isEditing = editingId === u.id;
+              return (
+                <tr key={u.id} className="border-t border-gray-200 dark:border-gray-700 align-top">
+                  {/* Username */}
+                  <td className="py-2 pr-4">
+                    {isEditing ? (
+                      <input
+                        type="text"
+                        value={editDraft?.username || ""}
+                        onChange={e => handleEditChange("username", e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        placeholder="Username"
+                      />
+                    ) : (
+                      <span className="font-medium">{u.username}</span>
+                    )}
+                  </td>
+
+                  {/* Email */}
+                  <td className="py-2 pr-4">
+                    {isEditing ? (
+                      <input
+                        type="email"
+                        value={editDraft?.email || ""}
+                        onChange={e => handleEditChange("email", e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                        placeholder="email@example.com"
+                      />
+                    ) : (
+                      <span className="text-gray-700 dark:text-gray-200">{u.email}</span>
+                    )}
+                  </td>
+
+                  {/* Roles */}
+                  <td className="py-2 pr-4">
+                    {isEditing ? (
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap gap-2">
+                          {editDraft?.roles?.length ? editDraft.roles.map(role => (
+                            <span
+                              key={role}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-indigo-100 dark:bg-indigo-700/40 text-indigo-700 dark:text-indigo-200 border border-indigo-200 dark:border-indigo-700"
+                            >
+                              {role}
+                              <button
+                                onClick={() => removeRoleFromDraft(role)}
+                                className="ml-1 text-xs px-1 rounded hover:bg-indigo-200 dark:hover:bg-indigo-600"
+                                title="Remove role"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          )) : (
+                            <span className="text-gray-500">No roles</span>
                           )}
-                        </td>
-                        <td className="py-2 pr-4">{u.last_login ? new Date(u.last_login).toLocaleString() : '—'}</td>
-                        <td className="py-2 pr-4">
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={roleInput}
+                            onChange={e => setRoleInput(e.target.value)}
+                            onKeyDown={handleRoleKeyDown}
+                            placeholder="Add role (press Enter)"
+                            className="flex-1 px-2 py-1 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                          />
+                          <button
+                            onClick={() => addRoleToDraft(roleInput)}
+                            className="px-3 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+                          >
+                            Add
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      u.roles && u.roles.length ? u.roles.map(r => (
+                        <span
+                          key={r}
+                          className="inline-block px-2 py-1 mr-1 rounded bg-indigo-100 dark:bg-indigo-700/40 text-indigo-700 dark:text-indigo-200"
+                        >
+                          {r}
+                        </span>
+                      )) : <span className="text-gray-500">—</span>
+                    )}
+                  </td>
+
+                  {/* Active */}
+                  <td className="py-2 pr-4">
+                    {u.is_active ? (
+                      <span className="inline-flex items-center gap-1 text-green-600">
+                        <ToggleRight /> Active
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-gray-500">
+                        <ToggleRight /> Inactive
+                      </span>
+                    )}
+                  </td>
+
+                  {/* Last login */}
+                  <td className="py-2 pr-4">
+                    {u.last_login ? new Date(u.last_login).toLocaleString() : "—"}
+                  </td>
+
+                  {/* Actions */}
+                  <td className="py-2 pr-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isEditing ? (
+                        <>
+                          <button
+                            onClick={() => saveUserDraft(u)}
+                            disabled={savingId === u.id}
+                            className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+                          >
+                            {savingId === u.id ? "Saving…" : "Save"}
+                          </button>
+                          <button
+                            onClick={cancelEdit}
+                            className="px-3 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => startEdit(u)}
+                            className="px-3 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+                          >
+                            Edit
+                          </button>
                           <button
                             onClick={() => toggleActive(u)}
                             className="px-3 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
                           >
-                            {u.is_active ? 'Disable' : 'Enable'}
+                            {u.is_active ? "Disable" : "Enable"}
                           </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          )}
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+        </tbody>
+      </table>
+    </div>
+  </section>
+)}
+
 
           {activePage === 'Chat Console' && (
-            <section className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-              <h2 className="text-lg font-medium text-gray-800 dark:text-gray-200 mb-3">Chat Console</h2>
+            <ChatConsole api={API} token={token} />
+        )}
 
-              <div className="flex gap-4">
-                {/* Left: users & chats */}
-                <div className="w-72">
-                  <div className="mb-2">
-                    <label className="block text-sm text-gray-600 dark:text-gray-300 mb-1">Select user</label>
-                    <select
-                      value={selectedUser}
-                      onChange={(e) => loadChatsForUser(e.target.value)}
-                      className="w-full px-3 py-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900"
-                    >
-                      <option value="">— choose —</option>
-                      {users.map(u => (
-                        <option key={u.id} value={u.id}>{u.username} ({u.email})</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="mt-3 border rounded h-[360px] overflow-y-auto">
-                    {userChats.length === 0 ? (
-                      <div className="p-3 text-sm text-gray-500">No chats</div>
-                    ) : userChats.map(c => (
-                      <div
-                        key={c.id}
-                        onClick={() => loadMessages(c.id)}
-                        className={`px-3 py-2 cursor-pointer border-b dark:border-gray-700 ${selectedChat === c.id ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`}
-                        title={c.title}
-                      >
-                        <div className="text-sm truncate">{c.title}</div>
-                        <div className="text-xs text-gray-500">{c.created_at ? new Date(c.created_at).toLocaleString() : ''}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Right: messages */}
-                <div className="flex-1 flex flex-col">
-                  <div className="border rounded h-[360px] overflow-y-auto p-3 space-y-2">
-                    {chatMsgs.length === 0 ? (
-                      <div className="text-sm text-gray-500">Select a chat to view messages</div>
-                    ) : chatMsgs.map((m, i) => (
-                      <div key={i} className={`max-w-3xl px-3 py-2 rounded ${m.role === 'user' ? 'bg-indigo-600 text-white ml-auto' : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-100 mr-auto'}`}>
-                        <div className="text-xs opacity-70 mb-1">{m.role} • {new Date(m.created_at).toLocaleString()}</div>
-                        <div>{m.text}</div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="mt-3 flex gap-2">
-                    <input
-                      value={replyText}
-                      onChange={(e) => setReplyText(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && sendReply()}
-                      placeholder="Send assistant reply…"
-                      className="flex-1 px-3 py-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900"
-                      disabled={!selectedChat || sending}
-                    />
-                    <button
-                      onClick={sendReply}
-                      disabled={!selectedChat || sending}
-                      className="px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-60"
-                    >
-                      Send
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </section>
-          )}
           {activePage === 'Docs' && (
             <Docs /> 
           )}

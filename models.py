@@ -3,11 +3,12 @@ import uuid
 from sqlalchemy import (
     Column, String, Boolean, DateTime, ForeignKey, Integer, Text, JSON, BigInteger
 )
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from db import Base
-
+import uuid
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 class User(Base):
     __tablename__ = "users"
     id = Column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -99,3 +100,17 @@ class Document(Base):
     status = Column(String(32), nullable=False, default="ready")
 
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+class VerificationCode(Base):
+    __tablename__ = "verification_codes"
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)  # <— use PG_UUID
+    user_id = Column(PG_UUID(as_uuid=True),
+                     ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False)
+    purpose = Column(String, nullable=False)
+    code_hash = Column(String, nullable=False)
+    attempts = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

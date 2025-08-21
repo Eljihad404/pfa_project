@@ -2,9 +2,11 @@
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, EmailStr
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql import func
+from uuid import UUID
 
 from db import get_db
 from models import User, Role, UserRole, Chat, Message, File, Activity
@@ -62,7 +64,6 @@ def list_users(db: Session = Depends(get_db), q: Optional[str] = None):
         query = query.filter((User.username.ilike(like)) | (User.email.ilike(like)))
     users = query.order_by(User.created_at.desc()).all()
 
-    # roles per user
     roles_map: Dict[str, List[str]] = {}
     if users:
         ids = [u.id for u in users]
@@ -75,22 +76,24 @@ def list_users(db: Session = Depends(get_db), q: Optional[str] = None):
         for uid, rname in rows:
             roles_map.setdefault(str(uid), []).append(rname)
 
-    out: List[UserRow] = []
-    for u in users:
-        out.append(UserRow(
+    return [
+        UserRow(
             id=str(u.id),
             username=u.username,
             email=u.email,
             is_active=u.is_active,
             roles=roles_map.get(str(u.id), []),
             created_at=u.created_at,
-            last_login=u.last_login
-        ))
-    return out
+            last_login=u.last_login,
+        )
+        for u in users
+    ]
 
 class UserUpdate(BaseModel):
+    username: Optional[str] = Field(default=None, min_length=1)
+    email: Optional[EmailStr] = None
     is_active: Optional[bool] = None
-    roles: Optional[List[str]] = None  # e.g. ["user"], ["admin","user"]
+    roles: Optional[List[str]] = None  # e.g. ["admin","user"]
 
 @router.patch("/users/{user_id}", dependencies=[Depends(require_admin)])
 def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db)):
@@ -98,20 +101,41 @@ def update_user(user_id: str, payload: UserUpdate, db: Session = Depends(get_db)
     if not user:
         raise HTTPException(404, "User not found")
 
+    # Username
+    if payload.username is not None and payload.username != user.username:
+        exists = db.query(User).filter(User.username == payload.username, User.id != user.id).first()
+        if exists:
+            raise HTTPException(409, "Username already in use")
+        user.username = payload.username
+
+    # Email
+    if payload.email is not None and payload.email != user.email:
+        exists = db.query(User).filter(User.email == payload.email, User.id != user.id).first()
+        if exists:
+            raise HTTPException(409, "Email already in use")
+        user.email = payload.email
+
+    # Active
     if payload.is_active is not None:
         user.is_active = payload.is_active
 
+    # Roles
     if payload.roles is not None:
-        # clear roles
         db.query(UserRole).filter(UserRole.user_id == user.id).delete()
-        # ensure roles exist then assign
         for rname in payload.roles:
             role = db.query(Role).filter_by(name=rname).first()
             if not role:
                 role = Role(name=rname, description=f"{rname} role")
                 db.add(role); db.commit(); db.refresh(role)
             db.add(UserRole(user_id=user.id, role_id=role.role_id))
-    db.commit()
+
+    try:
+        db.commit()
+        db.refresh(user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Username or email already in use")
+
     return {"ok": True}
 
 # ---------- CHAT CONSOLE ----------
@@ -129,19 +153,23 @@ class AdminMessage(BaseModel):
     text: str
 
 class AdminMsgRow(BaseModel):
+    id: str
     role: str
     text: str
     created_at: datetime
 
-@router.get("/chats/{chat_id}/messages", response_model=List[AdminMsgRow], dependencies=[Depends(require_admin)])
-def chat_messages(chat_id: str, db: Session = Depends(get_db)):
+@router.get("/chats/{chat_id}/messages",
+            response_model=List[AdminMsgRow],
+            dependencies=[Depends(require_admin)])
+def chat_messages(chat_id: str, db: Session = Depends(get_db), limit: int = 500):
     rows = (
         db.query(Message)
         .filter(Message.chat_id == chat_id)
         .order_by(Message.created_at.asc())
+        .limit(limit)
         .all()
     )
-    return [{"role": m.sender, "text": m.content, "created_at": m.created_at} for m in rows]
+    return [{"id": str(m.id), "role": m.sender, "text": m.content, "created_at": m.created_at} for m in rows]
 
 @router.post("/chats/{chat_id}/reply", dependencies=[Depends(require_admin)])
 def admin_reply(chat_id: str, payload: AdminMessage, db: Session = Depends(get_db)):
@@ -152,7 +180,27 @@ def admin_reply(chat_id: str, payload: AdminMessage, db: Session = Depends(get_d
     db.add(Message(chat_id=chat_id, sender="assistant", content=payload.text))
     db.commit()
     return {"ok": True}
+@router.patch("/chats/{chat_id}/messages/{message_id}", dependencies=[Depends(require_admin)])
+def admin_edit_message(chat_id: str, message_id: str, payload: AdminMessage, db: Session = Depends(get_db)):
+    msg = db.get(Message, message_id)
+    if not msg or str(msg.chat_id) != str(chat_id):
+        raise HTTPException(404, "Message not found")
+    if msg.sender != "assistant":
+        raise HTTPException(400, "Only assistant messages can be edited")
+    msg.content = payload.text
+    db.commit()
+    return {"ok": True}
 
+@router.delete("/chats/{chat_id}/messages/{message_id}", dependencies=[Depends(require_admin)])
+def admin_delete_message(chat_id: str, message_id: str, db: Session = Depends(get_db)):
+    msg = db.get(Message, message_id)
+    if not msg or str(msg.chat_id) != str(chat_id):
+        raise HTTPException(404, "Message not found")
+    if msg.sender != "assistant":
+        raise HTTPException(400, "Only assistant messages can be deleted")
+    db.delete(msg)
+    db.commit()
+    return {"ok": True}
 # ---------- LOGS ----------
 class ActivityRow(BaseModel):
     user_id: Optional[str]
